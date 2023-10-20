@@ -4,7 +4,18 @@ import logging
 from time import sleep
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import (
+    create_engine,
+    select,
+    String,
+    UniqueConstraint
+)
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    Session
+)
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 
@@ -18,6 +29,52 @@ SLEEPER = 3
 
 class NoGenreException(Exception):
     pass
+
+
+class Database:
+    def __init__(self):
+        class Base(DeclarativeBase):
+            pass
+
+        class PlaylistTrack(Base):
+            __tablename__ = "playlist_track"
+            __table_args__ = (
+                UniqueConstraint("playlist_id", "track_id", name="_uc_pid_tid"),
+            )
+
+            id: Mapped[int] = mapped_column(primary_key=True)
+            playlist_id: Mapped[str] = mapped_column(String(22))
+            track_id: Mapped[str] = mapped_column(String(22))
+        
+        self.engine = create_engine("sqlite+pysqlite:///playlists.sqlite", echo=True)
+        self.Base = Base
+        self.PlaylistTrack = PlaylistTrack
+        self.__setup()
+    
+    def __setup(self):
+        self.Base.metadata.create_all(self.engine)
+    
+    def record_playlist_track(self, playlist_id, track_id):
+        playlist_track = self.PlaylistTrack(
+            playlist_id=playlist_id,
+            track_id=track_id
+        )
+
+        with Session(self.engine) as session:
+            session.add(playlist_track)
+            session.commit()
+    
+    def check_playlist_track(self, playlist_id, track_id):
+        stmt = select(self.PlaylistTrack).where(playlist_id=playlist_id).\
+            where(track_id=track_id)
+        
+        with Session(self.engine) as session:
+            result = session.execute(stmt).first()
+        
+        if result is None:
+            return False
+        
+        return True
 
 
 class SpotifyCache:
@@ -176,6 +233,7 @@ class ListMaker:
         self.playlist_cache = PlaylistCache()
         self.artist_cache = ArtistCache()
         self.album_cache = AlbumCache()
+        self.database = Database()
 
     def connect(self):
         self.sp = Spotify(auth_manager=SpotifyOAuth(scope=self.scope))
@@ -231,7 +289,10 @@ class ListMaker:
         for genre in t.genres:
             playlist_name = f"{self.playlist_prefix} {genre}"
             pl = self.playlist_cache[playlist_name]
-            pl.add_track(t)
+
+            if self.database.check_playlist_track(pl.id_, t.id_):
+                pl.add_track(t)
+                self.database.record_playlist_track(pl.id_, t.id_)
 
     def __flush(self):
         for _, pl in self.playlist_cache.items():
